@@ -21,6 +21,7 @@ from ciicerone.llm.manager import LLMManager
 from ciicerone.config.loader import CiiceroneConfig, load_config
 from ciicerone.safety.content_filter import ContentFilter, get_global_filter
 from ciicerone.safety.exceptions import ContentFilterError
+from ciicerone.api.storage import ScenarioStorage, init_storage, resolve_database_url
 
 # Import API routers
 from ciicerone.api.routers import manuals_router, knowledge_router, feedback_router
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Global instances
 simulator: Optional[Simulator] = None
 llm_manager: Optional[LLMManager] = None
+storage: Optional[ScenarioStorage] = None
 
 # Default configuration location (repository root config.yaml)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
@@ -137,6 +139,11 @@ def get_content_filter() -> ContentFilter:
     return get_global_filter()
 
 
+def get_storage() -> Optional[ScenarioStorage]:
+    """Get the scenario/simulation storage instance (None when disabled)."""
+    return storage
+
+
 def _block_detail(prefix: str, filter_result) -> str:
     """Build a human-readable block reason from a FilterResult."""
     categories = (
@@ -183,7 +190,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan manager."""
-        global simulator, llm_manager
+        global simulator, llm_manager, storage
 
         # Startup
         logger.info("Starting Ciicerone API...")
@@ -194,12 +201,19 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             logger.error(f"Failed to initialize Ciicerone API: {str(e)}")
             raise
 
+        # Persistence layer (graceful degradation: no DATABASE_URL or an
+        # unreachable database means storage stays disabled)
+        storage = await init_storage(config)
+
         logger.info("Ciicerone API started successfully")
 
         yield
 
         # Shutdown
         logger.info("Shutting down Ciicerone API...")
+        if storage is not None:
+            await storage.close()
+            storage = None
         if storage is not None:
             await storage.close()
             storage = None
@@ -258,7 +272,8 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             components = {
                 "api": "healthy",
                 "simulator": "healthy" if simulator else "unavailable",
-                "llm_manager": "healthy" if llm_manager else "unavailable"
+                "llm_manager": "healthy" if llm_manager else "unavailable",
+                "storage": "healthy" if storage else "disabled"
             }
 
             # Overall status
@@ -295,6 +310,10 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                 metadata=request.metadata
             )
 
+            store = get_storage()
+            if store is not None:
+                await store.create_scenario(scenario)
+
             return ScenarioResponse(
                 scenario_id=scenario.scenario_id,
                 name=scenario.name,
@@ -329,13 +348,35 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
     ):
         """Execute a threat simulation."""
         try:
-            scenario = ThreatScenario(
-                name=f"Scenario_{request.scenario_id}",
-                threat_type=ThreatType.CUSTOM,
-                description="API-initiated simulation scenario"
-            )
+            store = get_storage()
+            if store is not None:
+                # Load the scenario persisted via POST /scenarios
+                scenario = await store.get_scenario(request.scenario_id)
+                if scenario is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Scenario {request.scenario_id} not found"
+                    )
+            else:
+                # Storage disabled - fall back to the previous in-memory behavior
+                logger.info(
+                    "Storage disabled - fabricating in-memory scenario for "
+                    f"simulation request {request.scenario_id}"
+                )
+                scenario = ThreatScenario(
+                    name=f"Scenario_{request.scenario_id}",
+                    threat_type=ThreatType.CUSTOM,
+                    description="API-initiated simulation scenario"
+                )
 
             result = await sim.execute_simulation(scenario)
+
+            if store is not None:
+                try:
+                    await store.create_simulation(result)
+                except Exception as e:
+                    # Persistence failure must not fail the executed simulation
+                    logger.error(f"Failed to persist simulation record: {e}")
 
             return {
                 "message": "Simulation executed successfully",
@@ -353,6 +394,51 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Simulation failed: {str(e)}"
+            )
+
+    @app.get("/simulations")
+    async def list_simulations(store: Optional[ScenarioStorage] = Depends(get_storage)):
+        """List persisted simulation records, most recent first."""
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Simulation storage is disabled (no DATABASE_URL configured)"
+            )
+        try:
+            return {"simulations": await store.list_simulations()}
+        except Exception as e:
+            logger.error(f"Failed to list simulations: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to list simulations"
+            )
+
+    @app.get("/simulations/{simulation_id}")
+    async def get_simulation(
+        simulation_id: str,
+        store: Optional[ScenarioStorage] = Depends(get_storage)
+    ):
+        """Get a persisted simulation record by ID."""
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Simulation storage is disabled (no DATABASE_URL configured)"
+            )
+        try:
+            record = await store.get_simulation(simulation_id)
+            if record is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Simulation {simulation_id} not found"
+                )
+            return record
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get simulation {simulation_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get simulation"
             )
 
     @app.get("/simulations/active")
