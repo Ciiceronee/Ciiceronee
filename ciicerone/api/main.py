@@ -188,7 +188,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
         # Startup
         logger.info("Starting Ciicerone API...")
         try:
-            llm_manager = LLMManager()
+            llm_manager = LLMManager(config=config.llm)
             simulator = Simulator(llm_provider=llm_manager)
         except Exception as e:
             logger.error(f"Failed to initialize Ciicerone API: {str(e)}")
@@ -421,7 +421,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                 scenario_type=request.scenario_type,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
-                provider=request.provider
+                provider_name=request.provider
             )
 
             end_time = datetime.utcnow()
@@ -443,10 +443,16 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                     detail=_block_detail("Generated content blocked by safety filter", output_result)
                 )
 
+            usage = getattr(response, 'usage', None)
+            if isinstance(usage, dict):
+                tokens_used = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+            else:
+                tokens_used = usage.total_tokens if usage else 0
+
             return ContentGenerationResponse(
                 content=response.content,
                 provider_used=response.provider,
-                tokens_used=response.usage.total_tokens if hasattr(response, 'usage') else 0,
+                tokens_used=tokens_used,
                 generation_time_seconds=generation_time,
                 safety_score=response.safety_score if hasattr(response, 'safety_score') else 1.0,
                 metadata=response.metadata if hasattr(response, 'metadata') else {}

@@ -71,7 +71,6 @@ class AnthropicProvider(BaseLLMProvider):
                 client.messages.create,
                 model=self.model,
                 max_tokens=max_tokens,
-                temperature=temperature,
                 system=system_message,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -82,17 +81,17 @@ class AnthropicProvider(BaseLLMProvider):
                 content=content,
                 provider="anthropic",
                 model=self.model,
-                tokens_used=response.usage.input_tokens + response.usage.output_tokens,
-                timestamp=datetime.utcnow(),
-                metadata={
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "prompt_length": len(prompt),
-                    "stop_reason": response.stop_reason,
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens
-                }
             )
+            llm_response.timestamp = datetime.utcnow()
+            llm_response.metadata = {
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "prompt_length": len(prompt),
+                "stop_reason": response.stop_reason,
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+                "tokens_used": response.usage.input_tokens + response.usage.output_tokens,
+            }
             llm_response.is_real_ai = True
             llm_response.usage = {
                 "input_tokens": response.usage.input_tokens,
