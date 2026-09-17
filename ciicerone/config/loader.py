@@ -3,7 +3,7 @@
 import os
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, List, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field
@@ -63,14 +63,37 @@ class AuditConfig(BaseModel):
     sanitize_values: bool = True
 
 
+class CORSConfig(BaseModel):
+    """Cross-Origin Resource Sharing configuration."""
+    origins: List[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    methods: List[str] = Field(default_factory=lambda: ["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+    headers: List[str] = Field(default_factory=lambda: ["*"])
+    allow_credentials: bool = False
+
+
+class AuthenticationConfig(BaseModel):
+    """API authentication configuration."""
+    enabled: bool = False
+    api_key: Optional[str] = None
+    header: str = "X-API-Key"
+    exempt_paths: List[str] = Field(default_factory=lambda: [
+        "/",
+        "/health",
+        "/docs",
+        "/openapi.json",
+        "/redoc",
+    ])
+
+
 class APIConfig(BaseModel):
     """API server configuration."""
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
-    cors_origins: list = Field(default_factory=lambda: ["http://localhost:3000"])
+    cors_origins: list = Field(default_factory=lambda: ["http://localhost:3000"])  # legacy, superseded by cors
+    cors: CORSConfig = Field(default_factory=CORSConfig)
     rate_limiting: Dict[str, Any] = Field(default_factory=dict)
-    authentication: Dict[str, Any] = Field(default_factory=dict)
+    authentication: AuthenticationConfig = Field(default_factory=AuthenticationConfig)
 
 
 class DatabaseSectionConfig(BaseModel):
@@ -242,12 +265,13 @@ def _apply_environment_overrides(config_data: Dict[str, Any]) -> Dict[str, Any]:
             config_data['llm']['azure']['api_version'] = os.getenv('AZURE_OPENAI_API_VERSION')
 
     # API Configuration
-    if os.getenv('API_KEY'):
+    api_key = os.getenv('CIICERONE_API_KEY') or os.getenv('API_KEY')
+    if api_key:
         if 'api' not in config_data:
             config_data['api'] = {}
         if 'authentication' not in config_data['api']:
             config_data['api']['authentication'] = {}
-        config_data['api']['authentication']['api_key'] = os.getenv('API_KEY')
+        config_data['api']['authentication']['api_key'] = api_key
         config_data['api']['authentication']['enabled'] = True
 
     # Logging level override
@@ -354,7 +378,7 @@ def validate_production_config(config: CiiceroneConfig) -> list:
     if config.api.debug:
         issues.append("Debug mode is enabled - disable for production")
 
-    if not config.api.authentication.get('enabled', False):
+    if not config.api.authentication.enabled:
         issues.append("API authentication is disabled - enable for production")
 
     # Check logging
