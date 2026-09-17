@@ -1,7 +1,7 @@
 # Ciicerone User Guide
 
-**Version:** 1.0.0  
-**Last Updated:** November 2025
+**Version:** 0.1.0  
+**Last Updated:** September 2026
 
 Complete guide for installing, configuring, and using Ciicerone for threat simulation and security training.
 

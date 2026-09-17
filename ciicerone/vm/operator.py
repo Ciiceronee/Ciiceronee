@@ -1,5 +1,11 @@
 """VM Operator for controlling virtual machines.
 
+.. note::
+    VM automation is **experimental** and **not part of v1**. Most operator
+    methods are unimplemented stubs (``NotImplementedError``) and exist only
+    as the design target for the post-v1 roadmap. Do not rely on this module
+    in production.
+
 This module provides the interface for AI agents to interact with VMs,
 including command execution, file transfer, and screenshot capture.
 """

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### API Security & Storage Hardening
+- **API authentication**: Token-based auth middleware protecting REST endpoints
+- **Safety filter enforcement**: Content filtering now enforced on API generation paths
+- **CORS configuration**: Explicit CORS policy for the FastAPI application
+- **Postgres storage**: Postgres-backed storage layer for scenarios and simulations
+
 #### Compliance Documentation (Issue #115)
 - **GDPR Compliance Framework**: Comprehensive documentation suite for GDPR (EU) 2016/679 compliance
   - Data mapping and processing activities register (Article 30)
@@ -23,14 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Industry standard alignment: ISO 27701, ICO Guidance, EDPB Guidelines
 
 ### Changed
-- Nothing yet
+- Default Anthropic model updated
 
 ### Fixed
-- Nothing yet
+- LLM provider wiring bugs
 
 ---
 
 ## [0.1.0] - 2025-12-29
+
+_Note: this release has not been tagged yet._
 
 ### 🎉 Initial Release
 
