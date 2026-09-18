@@ -21,7 +21,7 @@ console = Console()
 
 @click.group("vm")
 def vm_group():
-    """VM-based attack simulation commands.
+    """VM-based attack simulation commands (experimental — not part of v1).
 
     Run AI-controlled attack simulations in isolated virtual machines.
     Requires Docker or a hypervisor (Proxmox, VMware, etc.) to be configured.
@@ -284,7 +284,7 @@ def _setup_azure_infrastructure(force: bool, location: str, vm_size: str):
         console.print("\n[bold green]✓ Azure sandbox provisioned successfully![/bold green]")
         console.print("\nNext steps:")
         console.print("  1. Set CIICERONE_TOOL_SERVER_URL in your .env")
-        console.print("  2. Run: [cyan]ciicerone agent run \"Scan 10.0.100.10 for vulnerabilities\"[/cyan]")
+        console.print("  2. Run: [cyan]ciicerone vm attack --scenario phishing[/cyan]")
         console.print("  3. Cleanup: [cyan]az group delete --name ciicerone-rg --yes --no-wait[/cyan]")
     else:
         console.print(f"\n[red]Provisioning failed with exit code {result.returncode}[/red]")
@@ -464,10 +464,13 @@ def run_attack(
     dry_run: bool,
     output: Optional[str]
 ):
-    """Run an AI-controlled attack simulation.
+    """Run an AI-controlled attack simulation (experimental — not yet implemented).
 
     The AI will autonomously plan and execute attacks based on the scenario,
     adapting its strategy based on what it discovers.
+
+    Note: the underlying VM operator backend is still a skeleton and raises
+    NotImplementedError, so this command is not yet functional.
     """
     console.print(Panel(
         f"[bold]AI Attack Simulation[/bold]\n\n"

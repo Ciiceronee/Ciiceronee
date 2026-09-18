@@ -2,8 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Production Ready](https://img.shields.io/badge/status-production%20ready-brightgreen.svg)](https://github.com/Ciicerone/Ciicerone)
-[![Code Quality](https://img.shields.io/badge/maintainability-A+-brightgreen.svg)](https://github.com/Ciicerone/Ciicerone)
+[![Status: Beta](https://img.shields.io/badge/status-beta-yellow.svg)](https://github.com/Ciicerone/Ciicerone)
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-green.svg)](https://github.com/PyCQA/bandit)
 
 **Ciicerone** is an enterprise-grade cybersecurity threat simulation platform that leverages Large Language Models (LLMs) to generate realistic, context-aware threat scenarios for security training, red team exercises, and compliance testing.
@@ -13,17 +12,17 @@
 - **Multi-LLM Support**: ✅ Integrates with OpenAI GPT-4, Anthropic Claude, OpenRouter, and **Ollama (Local/Offline)**
 - **Local LLM Support**: 🆕 Run completely offline with Ollama - no API keys or internet required!
 - **YAML-Based Configuration**: ✅ Define threat scenarios using intuitive YAML schemas  
-- **Production-Ready Core**: ✅ Scalable simulation engine with proper data models
+- **Core Simulation Engine (Beta)**: ✅ LLM orchestration, safety filter enforcement, and a hardened REST API with authentication — currently in production-hardening
 - **CLI Interface**: ✅ Command-line tool for scenario management and execution
-- **REST API**: ✅ FastAPI-based REST endpoints for enterprise integration
-- **Safety Framework**: 🚧 Built-in content filtering and compliance (planned)
+- **REST API**: ✅ FastAPI-based REST endpoints with authentication for enterprise integration
+- **Safety Framework**: ✅ Built-in content filtering and compliance enforcement
 - **Analytics & Reporting**: 🚧 Comprehensive logging & metrics (planned)
+- **VM Automation, Threat Hunting, Audit CLI**: 🧪 Experimental — roadmap only, not part of v1
 
 ### Key Features
 
 - **Multi-LLM Support**: OpenAI GPT-4, Anthropic Claude, OpenRouter, Ollama, and local models
 - **YAML-Based Templates**: Define threat scenarios using intuitive, version-controlled templates
-- **Production-Grade Architecture**: Scalable, maintainable codebase with zero code duplication
 - **CLI & REST API**: Flexible interfaces for automation and integration
 - **Enterprise Deployment**: Docker, Kubernetes, and cloud-native deployment options
 - **Comprehensive Logging**: Audit trails and analytics for compliance
@@ -928,9 +927,9 @@ Full license information available in `LICENSE` file.
 
 ## Project Status
 
-- **Current Version**: 1.0.0
-- **Status**: Production Ready
-- **Last Updated**: November 23, 2025
+- **Current Version**: 0.1.0
+- **Status**: Beta — core (LLM orchestration, safety framework, authenticated API) is production-hardening; VM automation, threat hunting, and the audit CLI are experimental and not part of v1
+- **Last Updated**: September 2026
 - **Active Maintenance**: Yes
 - **Open to Contributions**: Yes
 

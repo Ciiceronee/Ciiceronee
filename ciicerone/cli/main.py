@@ -689,18 +689,6 @@ cli.add_command(feedback_cli, name="feedback")
 # Add Detection Rule Generator commands (Issue #25 - Blue Team)
 cli.add_command(detect_group, name="detect")
 
-# TODO: Implement agent module and re-enable
-# from .agent import agent_group
-# cli.add_command(agent_group, name="agent")
-
-# TODO: Implement hunt module and re-enable
-# from .hunt import hunt_group
-# cli.add_command(hunt_group, name="hunt")
-
-# TODO: Implement audit CLI module and re-enable
-# from .audit import audit_group
-# cli.add_command(audit_group, name="audit")
-
 
 def main() -> int:
     """Main entry point for the CLI."""

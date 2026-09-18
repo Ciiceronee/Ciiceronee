@@ -34,7 +34,7 @@ FROM python:3.11-slim
 # Set labels
 LABEL maintainer="Ciicerone Team"
 LABEL description="Ciicerone - AI-Powered Threat Simulation Platform"
-LABEL version="1.0.0"
+LABEL version="0.1.0"
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
