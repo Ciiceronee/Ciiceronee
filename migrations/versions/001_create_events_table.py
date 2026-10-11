@@ -30,7 +30,10 @@ def upgrade() -> None:
     op.create_table(
         'events',
         sa.Column('event_id', postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column('sequence_number', sa.BigInteger(), autoincrement=True, unique=True, nullable=False),
+        # Postgres only auto-increments PRIMARY KEY columns; a plain non-PK
+        # BIGINT gets no default. Global ordering is backed by an explicit
+        # sequence (created below in upgrade()).
+        sa.Column('sequence_number', sa.BigInteger(), unique=True, nullable=False),
         sa.Column('aggregate_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('aggregate_type', sa.String(50), nullable=False),
         sa.Column('version', sa.Integer(), nullable=False),
@@ -83,7 +86,17 @@ def upgrade() -> None:
         "CREATE INDEX idx_events_metadata ON audit.events USING GIN (metadata)"
     )
 
+    # Explicit sequence: Postgres does not auto-increment non-PK columns.
+    op.execute("CREATE SEQUENCE IF NOT EXISTS audit.events_sequence_number_seq")
+    op.execute(
+        "ALTER TABLE audit.events "
+        "ALTER COLUMN sequence_number "
+        "SET DEFAULT nextval('audit.events_sequence_number_seq')"
+    )
+
 
 def downgrade() -> None:
     """Drop the events table."""
+    op.execute("ALTER TABLE audit.events ALTER COLUMN sequence_number DROP DEFAULT")
+    op.execute("DROP SEQUENCE IF EXISTS audit.events_sequence_number_seq")
     op.drop_table('events', schema='audit')

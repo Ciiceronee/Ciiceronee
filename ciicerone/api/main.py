@@ -5,10 +5,11 @@ for threat simulation, scenario management, and system health checks.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,10 +18,13 @@ from pydantic import BaseModel, Field
 
 from ciicerone.core.models import ThreatScenario, SimulationResult, ThreatType
 from ciicerone.core.simulator import Simulator
+from ciicerone.core.event_sourcing import AggregateType, Event, EventStore
+from ciicerone.core.postgres_event_store import PostgresEventStore
 from ciicerone.llm.manager import LLMManager
 from ciicerone.config.loader import CiiceroneConfig, load_config
 from ciicerone.safety.content_filter import ContentFilter, get_global_filter
 from ciicerone.safety.exceptions import ContentFilterError
+from ciicerone.api.storage import ScenarioStorage, init_storage, resolve_database_url
 
 # Import API routers
 from ciicerone.api.routers import manuals_router, knowledge_router, feedback_router
@@ -33,6 +37,8 @@ logger = logging.getLogger(__name__)
 # Global instances
 simulator: Optional[Simulator] = None
 llm_manager: Optional[LLMManager] = None
+storage: Optional[ScenarioStorage] = None
+event_store: Optional[EventStore] = None
 
 # Default configuration location (repository root config.yaml)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
@@ -132,9 +138,47 @@ def get_llm_manager() -> LLMManager:
     return llm_manager
 
 
+async def _append_audit_event(
+    event_type: str,
+    aggregate_id: UUID,
+    version: int,
+    event_data: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append a simulation lifecycle event to the audit trail.
+
+    Audit failures are logged but never fail the request being audited -
+    the event store is an observer, not a gate.
+    """
+    if event_store is None:
+        return
+    try:
+        await event_store.append(
+            Event(
+                event_id=uuid4(),
+                aggregate_id=aggregate_id,
+                aggregate_type=AggregateType.SIMULATION,
+                event_type=event_type,
+                event_data=event_data,
+                metadata=metadata or {},
+                sequence_number=0,  # assigned by the database on insert
+                timestamp=datetime.now(timezone.utc),
+                version=version,
+            )
+        )
+        logger.info(f"Audit event appended: {event_type} (aggregate {aggregate_id}, v{version})")
+    except Exception as e:
+        logger.error(f"Failed to append audit event {event_type}: {e}")
+
+
 def get_content_filter() -> ContentFilter:
     """Get the shared content safety filter instance."""
     return get_global_filter()
+
+
+def get_storage() -> Optional[ScenarioStorage]:
+    """Get the scenario/simulation storage instance (None when disabled)."""
+    return storage
 
 
 def _block_detail(prefix: str, filter_result) -> str:
@@ -183,16 +227,38 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan manager."""
-        global simulator, llm_manager
+        global simulator, llm_manager, storage, event_store
 
         # Startup
         logger.info("Starting Ciicerone API...")
         try:
-            llm_manager = LLMManager()
+            llm_manager = LLMManager(config=config.llm)
             simulator = Simulator(llm_provider=llm_manager)
         except Exception as e:
             logger.error(f"Failed to initialize Ciicerone API: {str(e)}")
             raise
+
+        # Persistence layer (graceful degradation: no DATABASE_URL or an
+        # unreachable database means storage/event store stay disabled)
+        storage = await init_storage(config)
+        database_url = resolve_database_url(config)
+        if storage is not None and database_url is not None:
+            try:
+                # PostgresEventStore takes a plain asyncpg DSN, not a
+                # SQLAlchemy URL - strip any +driver suffix.
+                pg_dsn = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+                pg_store = await PostgresEventStore.create(pg_dsn)
+                event_store = EventStore(postgres_store=pg_store)
+                logger.info("Event sourcing audit trail enabled (PostgreSQL)")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize PostgreSQL event store ({e}); "
+                    "event sourcing audit trail disabled."
+                )
+                event_store = None
+        else:
+            event_store = None
+            logger.info("Event sourcing audit trail disabled (no PostgreSQL)")
 
         logger.info("Ciicerone API started successfully")
 
@@ -200,6 +266,9 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
 
         # Shutdown
         logger.info("Shutting down Ciicerone API...")
+        if event_store is not None and event_store.postgres_store is not None:
+            await event_store.postgres_store.close()
+            event_store = None
         if storage is not None:
             await storage.close()
             storage = None
@@ -258,7 +327,9 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             components = {
                 "api": "healthy",
                 "simulator": "healthy" if simulator else "unavailable",
-                "llm_manager": "healthy" if llm_manager else "unavailable"
+                "llm_manager": "healthy" if llm_manager else "unavailable",
+                "storage": "healthy" if storage else "disabled",
+                "event_store": "healthy" if event_store else "disabled"
             }
 
             # Overall status
@@ -295,6 +366,10 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                 metadata=request.metadata
             )
 
+            store = get_storage()
+            if store is not None:
+                await store.create_scenario(scenario)
+
             return ScenarioResponse(
                 scenario_id=scenario.scenario_id,
                 name=scenario.name,
@@ -329,17 +404,78 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
     ):
         """Execute a threat simulation."""
         try:
-            scenario = ThreatScenario(
-                name=f"Scenario_{request.scenario_id}",
-                threat_type=ThreatType.CUSTOM,
-                description="API-initiated simulation scenario"
+            store = get_storage()
+            if store is not None:
+                # Load the scenario persisted via POST /scenarios
+                scenario = await store.get_scenario(request.scenario_id)
+                if scenario is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Scenario {request.scenario_id} not found"
+                    )
+            else:
+                # Storage disabled - fall back to the previous in-memory behavior
+                logger.info(
+                    "Storage disabled - fabricating in-memory scenario for "
+                    f"simulation request {request.scenario_id}"
+                )
+                scenario = ThreatScenario(
+                    name=f"Scenario_{request.scenario_id}",
+                    threat_type=ThreatType.CUSTOM,
+                    description="API-initiated simulation scenario"
+                )
+
+            # Audit trail: one aggregate per simulation run. The run id is
+            # returned as audit_trail_id so clients can fetch the trail.
+            run_id = uuid4()
+            await _append_audit_event(
+                "SimulationStarted",
+                run_id,
+                1,
+                {
+                    "scenario_id": request.scenario_id,
+                    "scenario_name": scenario.name,
+                    "threat_type": getattr(
+                        scenario.threat_type, "value", str(scenario.threat_type)
+                    ),
+                    "storage_backed": store is not None,
+                },
             )
 
-            result = await sim.execute_simulation(scenario)
+            try:
+                # Execute simulation
+                result = await sim.execute_simulation(scenario)
+            except Exception as e:
+                await _append_audit_event(
+                    "SimulationFailed", run_id, 2, {"error": str(e)}
+                )
+                raise
+
+            await _append_audit_event(
+                "SimulationCompleted",
+                run_id,
+                2,
+                {
+                    "result_id": result.result_id,
+                    "scenario_id": result.scenario_id,
+                    "status": getattr(result.status, "value", str(result.status)),
+                    "stages_completed": len(result.stages),
+                    "success_rate": result.success_rate,
+                    "duration_seconds": result.total_duration_seconds,
+                },
+            )
+
+            if store is not None:
+                try:
+                    await store.create_simulation(result)
+                except Exception as e:
+                    # Persistence failure must not fail the executed simulation
+                    logger.error(f"Failed to persist simulation record: {e}")
 
             return {
                 "message": "Simulation executed successfully",
                 "result_id": result.result_id,
+                "audit_trail_id": str(run_id),
                 "status": result.status,
                 "stages_completed": len(result.stages),
                 "success_rate": result.success_rate,
@@ -353,6 +489,83 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Simulation failed: {str(e)}"
+            )
+
+    @app.get("/simulations")
+    async def list_simulations(store: Optional[ScenarioStorage] = Depends(get_storage)):
+        """List persisted simulation records, most recent first."""
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Simulation storage is disabled (no DATABASE_URL configured)"
+            )
+        try:
+            return {"simulations": await store.list_simulations()}
+        except Exception as e:
+            logger.error(f"Failed to list simulations: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to list simulations"
+            )
+
+    @app.get("/simulations/{simulation_id}")
+    async def get_simulation(
+        simulation_id: str,
+        store: Optional[ScenarioStorage] = Depends(get_storage)
+    ):
+        """Get a persisted simulation record by ID."""
+        if store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Simulation storage is disabled (no DATABASE_URL configured)"
+            )
+        try:
+            record = await store.get_simulation(simulation_id)
+            if record is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Simulation {simulation_id} not found"
+                )
+            return record
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get simulation {simulation_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to get simulation"
+            )
+
+    @app.get("/audit/events/{aggregate_id}")
+    async def get_audit_trail(aggregate_id: str):
+        """Get the append-only event audit trail for a simulation run.
+
+        The aggregate id is the `audit_trail_id` returned by POST /simulations.
+        """
+        if event_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Event store is disabled (no PostgreSQL configured)"
+            )
+        try:
+            aggregate_uuid = UUID(aggregate_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="aggregate_id must be a UUID"
+            )
+        try:
+            events = await event_store.get_events(aggregate_uuid)
+            return {
+                "aggregate_id": str(aggregate_uuid),
+                "event_count": len(events),
+                "events": [event.to_dict() for event in events],
+            }
+        except Exception as e:
+            logger.error(f"Failed to read audit trail {aggregate_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to read audit trail"
             )
 
     @app.get("/simulations/active")
@@ -421,7 +634,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                 scenario_type=request.scenario_type,
                 max_tokens=request.max_tokens,
                 temperature=request.temperature,
-                provider=request.provider
+                provider_name=request.provider
             )
 
             end_time = datetime.utcnow()
@@ -443,10 +656,16 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                     detail=_block_detail("Generated content blocked by safety filter", output_result)
                 )
 
+            usage = getattr(response, 'usage', None)
+            if isinstance(usage, dict):
+                tokens_used = usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
+            else:
+                tokens_used = usage.total_tokens if usage else 0
+
             return ContentGenerationResponse(
                 content=response.content,
                 provider_used=response.provider,
-                tokens_used=response.usage.total_tokens if hasattr(response, 'usage') else 0,
+                tokens_used=tokens_used,
                 generation_time_seconds=generation_time,
                 safety_score=response.safety_score if hasattr(response, 'safety_score') else 1.0,
                 metadata=response.metadata if hasattr(response, 'metadata') else {}
