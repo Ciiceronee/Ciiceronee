@@ -5,10 +5,11 @@ for threat simulation, scenario management, and system health checks.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
+from uuid import UUID, uuid4
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +18,8 @@ from pydantic import BaseModel, Field
 
 from ciicerone.core.models import ThreatScenario, SimulationResult, ThreatType
 from ciicerone.core.simulator import Simulator
+from ciicerone.core.event_sourcing import AggregateType, Event, EventStore
+from ciicerone.core.postgres_event_store import PostgresEventStore
 from ciicerone.llm.manager import LLMManager
 from ciicerone.config.loader import CiiceroneConfig, load_config
 from ciicerone.safety.content_filter import ContentFilter, get_global_filter
@@ -35,6 +38,7 @@ logger = logging.getLogger(__name__)
 simulator: Optional[Simulator] = None
 llm_manager: Optional[LLMManager] = None
 storage: Optional[ScenarioStorage] = None
+event_store: Optional[EventStore] = None
 
 # Default configuration location (repository root config.yaml)
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
@@ -134,6 +138,39 @@ def get_llm_manager() -> LLMManager:
     return llm_manager
 
 
+async def _append_audit_event(
+    event_type: str,
+    aggregate_id: UUID,
+    version: int,
+    event_data: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Append a simulation lifecycle event to the audit trail.
+
+    Audit failures are logged but never fail the request being audited -
+    the event store is an observer, not a gate.
+    """
+    if event_store is None:
+        return
+    try:
+        await event_store.append(
+            Event(
+                event_id=uuid4(),
+                aggregate_id=aggregate_id,
+                aggregate_type=AggregateType.SIMULATION,
+                event_type=event_type,
+                event_data=event_data,
+                metadata=metadata or {},
+                sequence_number=0,  # assigned by the database on insert
+                timestamp=datetime.now(timezone.utc),
+                version=version,
+            )
+        )
+        logger.info(f"Audit event appended: {event_type} (aggregate {aggregate_id}, v{version})")
+    except Exception as e:
+        logger.error(f"Failed to append audit event {event_type}: {e}")
+
+
 def get_content_filter() -> ContentFilter:
     """Get the shared content safety filter instance."""
     return get_global_filter()
@@ -190,7 +227,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan manager."""
-        global simulator, llm_manager, storage
+        global simulator, llm_manager, storage, event_store
 
         # Startup
         logger.info("Starting Ciicerone API...")
@@ -202,8 +239,26 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             raise
 
         # Persistence layer (graceful degradation: no DATABASE_URL or an
-        # unreachable database means storage stays disabled)
+        # unreachable database means storage/event store stay disabled)
         storage = await init_storage(config)
+        database_url = resolve_database_url(config)
+        if storage is not None and database_url is not None:
+            try:
+                # PostgresEventStore takes a plain asyncpg DSN, not a
+                # SQLAlchemy URL - strip any +driver suffix.
+                pg_dsn = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+                pg_store = await PostgresEventStore.create(pg_dsn)
+                event_store = EventStore(postgres_store=pg_store)
+                logger.info("Event sourcing audit trail enabled (PostgreSQL)")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize PostgreSQL event store ({e}); "
+                    "event sourcing audit trail disabled."
+                )
+                event_store = None
+        else:
+            event_store = None
+            logger.info("Event sourcing audit trail disabled (no PostgreSQL)")
 
         logger.info("Ciicerone API started successfully")
 
@@ -211,9 +266,9 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
 
         # Shutdown
         logger.info("Shutting down Ciicerone API...")
-        if storage is not None:
-            await storage.close()
-            storage = None
+        if event_store is not None and event_store.postgres_store is not None:
+            await event_store.postgres_store.close()
+            event_store = None
         if storage is not None:
             await storage.close()
             storage = None
@@ -273,7 +328,8 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                 "api": "healthy",
                 "simulator": "healthy" if simulator else "unavailable",
                 "llm_manager": "healthy" if llm_manager else "unavailable",
-                "storage": "healthy" if storage else "disabled"
+                "storage": "healthy" if storage else "disabled",
+                "event_store": "healthy" if event_store else "disabled"
             }
 
             # Overall status
@@ -369,7 +425,45 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
                     description="API-initiated simulation scenario"
                 )
 
-            result = await sim.execute_simulation(scenario)
+            # Audit trail: one aggregate per simulation run. The run id is
+            # returned as audit_trail_id so clients can fetch the trail.
+            run_id = uuid4()
+            await _append_audit_event(
+                "SimulationStarted",
+                run_id,
+                1,
+                {
+                    "scenario_id": request.scenario_id,
+                    "scenario_name": scenario.name,
+                    "threat_type": getattr(
+                        scenario.threat_type, "value", str(scenario.threat_type)
+                    ),
+                    "storage_backed": store is not None,
+                },
+            )
+
+            try:
+                # Execute simulation
+                result = await sim.execute_simulation(scenario)
+            except Exception as e:
+                await _append_audit_event(
+                    "SimulationFailed", run_id, 2, {"error": str(e)}
+                )
+                raise
+
+            await _append_audit_event(
+                "SimulationCompleted",
+                run_id,
+                2,
+                {
+                    "result_id": result.result_id,
+                    "scenario_id": result.scenario_id,
+                    "status": getattr(result.status, "value", str(result.status)),
+                    "stages_completed": len(result.stages),
+                    "success_rate": result.success_rate,
+                    "duration_seconds": result.total_duration_seconds,
+                },
+            )
 
             if store is not None:
                 try:
@@ -381,6 +475,7 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             return {
                 "message": "Simulation executed successfully",
                 "result_id": result.result_id,
+                "audit_trail_id": str(run_id),
                 "status": result.status,
                 "stages_completed": len(result.stages),
                 "success_rate": result.success_rate,
@@ -439,6 +534,38 @@ def create_app(config: Optional[CiiceroneConfig] = None) -> FastAPI:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to get simulation"
+            )
+
+    @app.get("/audit/events/{aggregate_id}")
+    async def get_audit_trail(aggregate_id: str):
+        """Get the append-only event audit trail for a simulation run.
+
+        The aggregate id is the `audit_trail_id` returned by POST /simulations.
+        """
+        if event_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Event store is disabled (no PostgreSQL configured)"
+            )
+        try:
+            aggregate_uuid = UUID(aggregate_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="aggregate_id must be a UUID"
+            )
+        try:
+            events = await event_store.get_events(aggregate_uuid)
+            return {
+                "aggregate_id": str(aggregate_uuid),
+                "event_count": len(events),
+                "events": [event.to_dict() for event in events],
+            }
+        except Exception as e:
+            logger.error(f"Failed to read audit trail {aggregate_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to read audit trail"
             )
 
     @app.get("/simulations/active")
