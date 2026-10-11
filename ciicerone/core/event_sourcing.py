@@ -390,13 +390,24 @@ class EventStore:
     Thread-safe for concurrent writes.
     """
 
-    def __init__(self, connection_pool: Any = None):
+    def __init__(self, connection_pool: Any = None, postgres_store: Any = None):
         """Initialize event store with database connection pool.
         
         Args:
             connection_pool: Async database connection pool (asyncpg, SQLAlchemy, etc.)
+                Kept for backwards compatibility; a PostgresEventStore passed here
+                positionally is detected and used for persistence.
+            postgres_store: Optional PostgresEventStore instance used for real
+                PostgreSQL writes/queries. When None, the store keeps its
+                previous in-memory (no-op) behavior.
         """
         self.connection_pool = connection_pool
+        if postgres_store is None and connection_pool is not None:
+            from .postgres_event_store import PostgresEventStore
+            if isinstance(connection_pool, PostgresEventStore):
+                postgres_store = connection_pool
+                self.connection_pool = None
+        self.postgres_store = postgres_store
         self._sequence_lock = asyncio.Lock()
         self._current_sequence = 0
         logger.info("EventStore initialized")
@@ -423,32 +434,22 @@ class EventStore:
             ConcurrencyError: If version conflict detected
             EventStoreError: If write fails
         """
+        if self.postgres_store is not None:
+            # Delegate to the real PostgreSQL-backed store (PostgresEventStore)
+            await self.postgres_store.append(event)
+            return
+
         if self.connection_pool is None:
             # In-memory mode for testing
             logger.warning("No connection pool - using in-memory event store")
             return
 
         try:
-            # TODO: Implement actual PostgreSQL write
-            # async with self.connection_pool.acquire() as conn:
-            #     # Check version for optimistic concurrency
-            #     current_version = await self._get_aggregate_version(conn, event.aggregate_id)
-            #     if current_version != event.version - 1:
-            #         raise ConcurrencyError(event.aggregate_id, event.version - 1, current_version)
-            #
-            #     # Insert event
-            #     await conn.execute("""
-            #         INSERT INTO events (
-            #             event_id, aggregate_id, aggregate_type, event_type,
-            #             event_data, metadata, sequence_number, timestamp, version
-            #         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            #     """, ...)
-            
             logger.debug(
                 f"Event appended: {event.event_type} for {event.aggregate_type}:"
                 f"{event.aggregate_id} (v{event.version}, seq={event.sequence_number})"
             )
-            
+
         except Exception as e:
             logger.error(f"Failed to append event: {e}")
             raise EventStoreError(f"Event append failed: {e}") from e
@@ -469,7 +470,8 @@ class EventStore:
         Returns:
             List of events ordered by version
         """
-        # TODO: Implement PostgreSQL query
+        if self.postgres_store is not None:
+            return await self.postgres_store.get_events(aggregate_id, from_version, to_version)
         logger.debug(f"Fetching events for {aggregate_id} from v{from_version}")
         return []
 
@@ -491,7 +493,10 @@ class EventStore:
         Returns:
             List of events ordered by timestamp
         """
-        # TODO: Implement PostgreSQL query
+        if self.postgres_store is not None:
+            return await self.postgres_store.get_events_by_type(
+                event_type, from_timestamp, to_timestamp, limit
+            )
         logger.debug(f"Querying events of type {event_type} from {from_timestamp} to {to_timestamp}")
         return []
 
@@ -513,10 +518,17 @@ class EventStore:
         if not events:
             return None
 
-        # TODO: Implement aggregate reconstruction
-        # This will dispatch to appropriate aggregate class based on aggregate_type
+        if self.postgres_store is None:
+            # No persistent store configured - nothing to reconstruct from
+            logger.debug(f"Replaying {len(events)} events for aggregate {aggregate_id}")
+            return None
+
+        # Reconstruct the aggregate by re-applying its events in order
+        aggregate = EventSourcedAggregate(aggregate_id)
+        for event in events:
+            aggregate.apply_event(event)
         logger.debug(f"Replaying {len(events)} events for aggregate {aggregate_id}")
-        return None
+        return aggregate
 
     async def get_aggregate_version(self, aggregate_id: UUID) -> int:
         """Get current version of an aggregate.
@@ -527,7 +539,8 @@ class EventStore:
         Returns:
             Current version number (0 if aggregate doesn't exist)
         """
-        # TODO: Implement version query
+        if self.postgres_store is not None:
+            return await self.postgres_store.get_aggregate_version(aggregate_id)
         return 0
 
 

@@ -47,6 +47,7 @@ dependencies = [
     "cryptography>=48.0.1",
     "idna>=3.15",
     "beautifulsoup4>=4.12.2",
+    "psutil>=5.9.6",
 ]
 
 [project.optional-dependencies]

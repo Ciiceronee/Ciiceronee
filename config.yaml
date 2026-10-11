@@ -18,7 +18,7 @@ llm:
   # Secondary provider - Anthropic Claude
   anthropic:
     api_key: ""  # Set via environment variable ANTHROPIC_API_KEY
-    model: "claude-3-haiku-20240307"  # Fast and cost-effective
+    model: "claude-haiku-4-5-20251001"  # Fast and cost-effective
     base_url: "https://api.anthropic.com"
     max_tokens: 1000
     temperature: 0.7
@@ -204,15 +204,34 @@ api:
   host: "0.0.0.0"
   port: 8000
   debug: false
-  cors_origins:
-    - "http://localhost:3000"
-    - "http://localhost:8080"
+  cors:
+    origins:
+      - "http://localhost:3000"
+      - "http://localhost:8080"
+    methods:
+      - "GET"
+      - "POST"
+      - "PUT"
+      - "DELETE"
+      - "OPTIONS"
+    headers:
+      - "*"
+    allow_credentials: false  # Only enable when origins are explicitly configured
   rate_limiting:
     enabled: true
     requests_per_minute: 60
   authentication:
     enabled: false  # Set to true for production
-    api_key: ""  # Set via environment variable API_KEY
+    api_key: ""  # Set via environment variable CIICERONE_API_KEY or API_KEY
+    header: "X-API-Key"
+    exempt_paths:  # Exact paths exempt from API key authentication
+      - "/"
+      - "/health"
+      - "/docs"
+      - "/openapi.json"
+      - "/redoc"
+      # Optionally make feedback submission public, e.g.:
+      # - "/api/feedback/submit"
 
 # Deployment Configuration (Optional - for advanced features)
 deployment:
